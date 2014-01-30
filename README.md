@@ -4,8 +4,8 @@ A small implementation of Bonjour/Zeroconf (Wikipedia) that can run on your ethe
 
 As examples, you can use this library to register a small web-server running on your Arduino, which can then be easily discovered by other users on your network. Or use it to discover nodes offering a service your Arduino sketch can work with. It's just like Bonjour running on your desktop.
 
-**You can find here a modernized port of the original library of [http://gkaindl.com/software/arduino-ethernet/bonjour]. This fork uses the build-on EthernetUDP class
-and is much simpler and with fewer helper-classes than the original code.**
+**Here you can find a modernized port of the original library from [http://gkaindl.com/software/arduino-ethernet/bonjour]. This fork uses the build-in EthernetUDP class
+and is therefore much simpler and doesn't need any helper-classes anymore.**
 
 Documentation
 -------------
