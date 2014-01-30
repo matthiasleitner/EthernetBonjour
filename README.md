@@ -15,7 +15,7 @@ int begin();
 int begin(const char* bonjourName);
 In order to initialize the library, you must call begin() before any other library method, but after your Ethernet shield itself has been initialized, preferably within your setup() function. When you initialize the library, you can supply an (arbitrary) name under which your Arduino board can then be referenced on the network.
 
-The default name is "arduino", which means that you can access the board conveniently on the Bonjour network via the MDNS name "arduino.local" — However, do not attach the ".local" postfix when you specify the name in begin().
+The default name is "arduino", which means that you can access the board conveniently on the Bonjour network via the MDNS name "arduino.local" ï¿½ However, do not attach the ".local" postfix when you specify the name in begin().
 
 The method will return a non-zero result if the library could be initialized successfully, otherwise 0 will be returned.
 
@@ -123,8 +123,8 @@ Registering services is very reliable, but discovering services is not (due to t
 Due to memory limitations, you can only discover a maximum of 6 service endpoints per host and service type. For example, if a host vends 10 HTTP endpoints, only the first 6 will be found. If you want to risk memory exhaustion/corruption, you can change the MDNS_MAX_SERVICES_PER_PACKET macro in EthernetBonjour.cpp.
 Also due to similar memory limitations, you can only vend up to 8 services running on your board. If you want to change this limitation, edit "NumMDNSServiceRecords" in EthernetBonjour.h (but note that the WIZnet chipset on the ethernet shield only supports 4 sockets anyway, one already taken up by the Bonjour library, so 8 services might be way too much anyway. Thus, you could also lower this constant to free up some memory).
 The library is rather large (about 14K) and will thus only fit onto Arduino boards with at least 32K of flash memory (such as the Duemilanove, the Nano 3.0 or the MEGA). You might be able to fit it onto older boards by getting rid of the discovery stuff if you're only interested in registering services, for example. Personally, I've developed the library on a Duemilanove and use it on MEGA boards.
-The library has only been tested with Apple's Bonjour (on both a small and rather large network): Service registration will most likely work with other implementations as well, service discovery might not — Give it a try and email me patches!
-The implementation adheres to the Zeroconf specs, but is rather "noisy" in that service registration is resent with a Time-To-Live of 2 minutes — This is because I do not want stale registrations to hang around for long when you reset your board, and a modern network should really be able to handle the additional couple of bytes every two minutes ;-)
+The library has only been tested with Apple's Bonjour (on both a small and rather large network): Service registration will most likely work with other implementations as well, service discovery might not ï¿½ Give it a try and email me patches!
+The implementation adheres to the Zeroconf specs, but is rather "noisy" in that service registration is resent with a Time-To-Live of 2 minutes ï¿½ This is because I do not want stale registrations to hang around for long when you reset your board, and a modern network should really be able to handle the additional couple of bytes every two minutes ;-)
 
 Pro Tip: Save code size if you don't need all features
 ------------------------------------------------------
