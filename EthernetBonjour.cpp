@@ -1,7 +1,7 @@
-//  Copyright (C) 2010 Georg Kaindl
-//  http://gkaindl.com
+//  Copyright (C) 2010 Georg Kaindl (http://gkaindl.com)
+//  Copyright (C) 2013 David Gräff (david.graeff@web.de)
 //
-//  This file is part of Arduino EthernetBonjour.
+//  This file is part of Arduino Bonjour/mDNS/Avahi for arduino 1.5+
 //
 //  EthernetBonjour is free software: you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public License
@@ -19,39 +19,34 @@
 //
 
 #define  HAS_SERVICE_REGISTRATION      1  // disabling saves about 1.25 kilobytes
-#define  HAS_NAME_BROWSING             1 // disable together with above, additionally saves about 4.3 kilobytes
+#define  HAS_NAME_BROWSING             0  // disable together with above, additionally saves about 4.3 kilobytes
 
 #include <string.h>
 #include <stdlib.h>
+#include <Arduino.h>
+#include <Ethernet.h>
+#include <util.h>
+#include <utility/w5100.h>
 
-#if defined(ARDUINO) && ARDUINO >= 100
-//Arduino 1.0 and later
-#include "Arduino.h"
-#else
-//Pre Arduino 1.0 
-extern "C" {
-   #include "wiring.h"
-}
-#endif
-
-extern "C" {
-   #include <utility/EthernetUtil.h>
-}
-
-#include <utility/EthernetCompat.h>
 #include "EthernetBonjour.h"
 
 #define  MDNS_DEFAULT_NAME       "arduino"
 #define  MDNS_TLD                ".local"
 #define  DNS_SD_SERVICE          "_services._dns-sd._udp.local"
 #define  MDNS_SERVER_PORT        (5353)
-#define  MDNS_NQUERY_RESEND_TIME (1000)   // 1 second, name query resend timeout
-#define  MDNS_SQUERY_RESEND_TIME (10000)  // 10 seconds, service query resend timeout
+#define  MDNS_NQUERY_RESEND_TIME (1000)   // 1 second, name query re-send timeout
+#define  MDNS_SQUERY_RESEND_TIME (10000)  // 10 seconds, service query re-send timeout
 #define  MDNS_RESPONSE_TTL       (120)    // two minutes (in seconds)
 
 #define  MDNS_MAX_SERVICES_PER_PACKET  (6)
 
-#define  NUM_SOCKETS             (4)
+
+#if defined(W5200)
+  #define MAX_SOCK_NUM 8
+#else
+  #define MAX_SOCK_NUM 4
+#endif
+
 
 #define  _BROKEN_MALLOC_   1
 #undef _USE_MALLOC_
@@ -94,6 +89,8 @@ typedef enum _DNSOpCode_t {
    DNSOpUpdate    = 5
 } DNSOpCode_t;
 
+
+
 // for some reason, I get data corruption issues with normal malloc() on arduino 0017
 void* my_malloc(unsigned s)
 {
@@ -127,7 +124,6 @@ EthernetBonjourClass::EthernetBonjourClass()
    memset(&this->_serviceRecords, 0, sizeof(this->_serviceRecords));
    
    this->_state = MDNSStateIdle;
-   this->_socket = -1;
    
    this->_bonjourName = NULL;
    this->_resolveNames[0] = NULL;
@@ -281,25 +277,8 @@ int EthernetBonjourClass::_startMDNSSession()
 {
    (void)this->_closeMDNSSession();
       
-   int i;
-   for (i = NUM_SOCKETS-1; i>=0; i--)
-      if (ECSockClosed == ethernet_compat_read_SnSr(i)) {
-         this->_socket = i;
-         break;
-      }
-
-   if (this->_socket < 0)
+   if (this->iUdp.beginMulti(mdnsMulticastIPAddr, MDNS_SERVER_PORT) != 1)
       return 0;
-	
-	uint16_t port = MDNS_SERVER_PORT;
-
-   ethernet_compat_write_DHAR(this->_socket, mdnsHWAddr);
-   ethernet_compat_write_SnDIPR(this->_socket, mdnsMulticastIPAddr);
-   ethernet_compat_write_SnDPORT(this->_socket, port);
-   
-   if (ethernet_compat_socket(this->_socket, ECSnMrUDP, MDNS_SERVER_PORT, ECSnMrMulticast) < 0)
-      return 0;
-   
    return 1;
 }
 
@@ -308,10 +287,8 @@ int EthernetBonjourClass::_startMDNSSession()
 // 0 otherwise
 int EthernetBonjourClass::_closeMDNSSession()
 {
-   if (this->_socket > -1)
-      ethernet_compat_close(this->_socket);
-
-   this->_socket = -1;
+  this->iUdp.stop();
+  return 1;
 }
 
 // return value:
@@ -321,65 +298,50 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
                                                    int serviceRecord)
 {
    MDNSError_t statusCode = MDNSSuccess;
-   uint16_t ptr = 0;
-#if defined(_USE_MALLOC_)
-   DNSHeader_t* dnsHeader = NULL;
-#else
-   DNSHeader_t dnsHeaderBuf;
+   DNSHeader_t dnsHeaderBuf = {0};
    DNSHeader_t* dnsHeader = &dnsHeaderBuf;
-#endif
    uint8_t* buf;
    
-   ptr = ethernet_compat_read_SnTX_WR(this->_socket);
-
-#if defined(_USE_MALLOC_)
-   dnsHeader = (DNSHeader_t*)my_malloc(sizeof(DNSHeader_t));
-   if (NULL == dnsHeader) {
-      statusCode = MDNSOutOfMemory;
-      goto errorReturn;
-   }
-#endif
-      
-   memset(dnsHeader, 0, sizeof(DNSHeader_t));
+   //memset(dnsHeader, 0, sizeof(DNSHeader_t));
    
-   dnsHeader->xid = ethutil_htons(xid);
+   dnsHeader->xid = htons(xid);
    dnsHeader->opCode = DNSOpQuery;
    
    switch (type) {
       case MDNSPacketTypeServiceRecordRelease:
       case MDNSPacketTypeMyIPAnswer:
-         dnsHeader->answerCount = ethutil_htons(1);
+         dnsHeader->answerCount = htons(1);
          dnsHeader->queryResponse = 1;
          dnsHeader->authoritiveAnswer = 1;
          break;
       case MDNSPacketTypeServiceRecord:
-         dnsHeader->answerCount = ethutil_htons(4);
-         dnsHeader->additionalCount = ethutil_htons(1);
+         dnsHeader->answerCount = htons(4);
+         dnsHeader->additionalCount = htons(1);
          dnsHeader->queryResponse = 1;
          dnsHeader->authoritiveAnswer = 1;
          break;
       case MDNSPacketTypeNameQuery:
       case MDNSPacketTypeServiceQuery:
-         dnsHeader->queryCount = ethutil_htons(1);
+         dnsHeader->queryCount = htons(1);
          break;
       case MDNSPacketTypeNoIPv6AddrAvailable:
-         dnsHeader->queryCount = ethutil_htons(1);
-         dnsHeader->additionalCount = ethutil_htons(1);
+         dnsHeader->queryCount = htons(1);
+         dnsHeader->additionalCount = htons(1);
          dnsHeader->responseCode = 0x03;
          dnsHeader->authoritiveAnswer = 1;
          dnsHeader->queryResponse = 1;
          break;
    }
    
-   ethernet_compat_write_data(this->_socket, (uint8_t*)dnsHeader, (uint8_t*)ptr, sizeof(DNSHeader_t));
-   ptr += sizeof(DNSHeader_t);
-
+   iUdp.beginPacket(mdnsMulticastIPAddr, MDNS_SERVER_PORT);
+   iUdp.write((uint8_t*)dnsHeader,sizeof(DNSHeader_t));
+    
    buf = (uint8_t*)dnsHeader;
    
    // construct the answer section
    switch (type) {
       case MDNSPacketTypeMyIPAnswer: {
-         this->_writeMyIPAnswerRecord(&ptr, buf, sizeof(DNSHeader_t));
+         this->_writeMyIPAnswerRecord();
          break;
       }
 
@@ -388,7 +350,7 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
       case MDNSPacketTypeServiceRecord: {
 
          // SRV location record
-         this->_writeServiceRecordName(serviceRecord, &ptr, buf, sizeof(DNSHeader_t), 0);
+         this->_writeServiceRecordName(serviceRecord, 0);
          
          buf[0] = 0x00;
          buf[1] = 0x21;    // SRV record
@@ -396,28 +358,26 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
          buf[3] = 0x01;    // class IN
          
          // ttl
-         *((uint32_t*)&buf[4]) = ethutil_htonl(MDNS_RESPONSE_TTL);
+         *((uint32_t*)&buf[4]) = htonl(MDNS_RESPONSE_TTL);
          
          // data length
-         *((uint16_t*)&buf[8]) = ethutil_htons(8 + strlen((char*)this->_bonjourName));
+         *((uint16_t*)&buf[8]) = htons(8 + strlen((char*)this->_bonjourName));
          
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 10);
-         ptr += 10;
+         iUdp.write((uint8_t*)buf,10);
          
          // priority and weight
          buf[0] = buf[1] = buf[2] = buf[3] = 0;
          
          // port
-         *((uint16_t*)&buf[4]) = ethutil_htons(this->_serviceRecords[serviceRecord]->port);
+         *((uint16_t*)&buf[4]) = htons(this->_serviceRecords[serviceRecord]->port);
          
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 6);
-         ptr += 6;
+         iUdp.write((uint8_t*)buf,6);
          
          // target
-         this->_writeDNSName(this->_bonjourName, &ptr, buf, sizeof(DNSHeader_t), 1);
+         this->_writeDNSName(this->_bonjourName, 1);
          
          // TXT record
-         this->_writeServiceRecordName(serviceRecord, &ptr, buf, sizeof(DNSHeader_t), 0);
+         this->_writeServiceRecordName(serviceRecord, 0);
          
          buf[0] = 0x00;
          buf[1] = 0x10;    // TXT record
@@ -425,31 +385,25 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
          buf[3] = 0x01;    // class IN
          
          // ttl
-         *((uint32_t*)&buf[4]) = ethutil_htonl(MDNS_RESPONSE_TTL);
+         *((uint32_t*)&buf[4]) = htonl(MDNS_RESPONSE_TTL);
          
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 8);
-         ptr += 8;
+         iUdp.write((uint8_t*)buf,8);
          
          // data length && text
          if (NULL == this->_serviceRecords[serviceRecord]->textContent) {
             buf[0] = 0x00;
             buf[1] = 0x01;
             buf[2] = 0x00;
-            ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 3);
-            ptr += 3;
+            iUdp.write((uint8_t*)buf,3);
          } else {
             int slen = strlen((char*)this->_serviceRecords[serviceRecord]->textContent);
-            *((uint16_t*)buf) = ethutil_htons(slen);
-            ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 2);
-            ptr += 2;
-            ethernet_compat_write_data(this->_socket, (uint8_t*)this->_serviceRecords[serviceRecord]->textContent,
-                       (uint8_t*)ptr, slen);
-            ptr += slen;
+            *((uint16_t*)buf) = htons(slen);
+            iUdp.write((uint8_t*)buf,2);
+            iUdp.write((uint8_t*)this->_serviceRecords[serviceRecord]->textContent,slen);
          }
          
          // PTR record (for the dns-sd service in general)
-         this->_writeDNSName((const uint8_t*)DNS_SD_SERVICE, &ptr, buf,
-                                          sizeof(DNSHeader_t), 1);
+         this->_writeDNSName((const uint8_t*)DNS_SD_SERVICE, 1);
          
          buf[0] = 0x00;
          buf[1] = 0x0c;    // PTR record
@@ -457,30 +411,29 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
          buf[3] = 0x01;    // class IN
          
          // ttl
-         *((uint32_t*)&buf[4]) = ethutil_htonl(MDNS_RESPONSE_TTL);
+         *((uint32_t*)&buf[4]) = htonl(MDNS_RESPONSE_TTL);
          
          // data length.
          uint16_t dlen = strlen((char*)this->_serviceRecords[serviceRecord]->servName) + 2;
-         *((uint16_t*)&buf[8]) = ethutil_htons(dlen);
+         *((uint16_t*)&buf[8]) = htons(dlen);
          
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 10);
-         ptr += 10;
+         iUdp.write((uint8_t*)buf,10);
          
-         this->_writeServiceRecordName(serviceRecord, &ptr, buf, sizeof(DNSHeader_t), 1);
+         this->_writeServiceRecordName(serviceRecord, 1);
          
          // PTR record (our service)
-         this->_writeServiceRecordPTR(serviceRecord, &ptr, buf, sizeof(DNSHeader_t),
+         this->_writeServiceRecordPTR(serviceRecord,
                                       MDNS_RESPONSE_TTL);
          
          // finally, our IP address as additional record
-         this->_writeMyIPAnswerRecord(&ptr, buf, sizeof(DNSHeader_t));
+         this->_writeMyIPAnswerRecord();
 
          break;
       }
       
       case MDNSPacketTypeServiceRecordRelease: {
          // just send our service PTR with a TTL of zero
-         this->_writeServiceRecordPTR(serviceRecord, &ptr, buf, sizeof(DNSHeader_t), 0);
+         this->_writeServiceRecordPTR(serviceRecord, 0);
          break;
       }
       
@@ -495,13 +448,12 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
          this->_writeDNSName(
                (type == MDNSPacketTypeServiceQuery) ? this->_resolveNames[1] :
                                                       this->_resolveNames[0],
-               &ptr, buf, sizeof(DNSHeader_t), 1);
+               , 1);
 
          buf[0] = buf[2] = 0x0;
          buf[1] = (type == MDNSPacketTypeServiceQuery) ? 0x0c : 0x01; 
          buf[3] = 0x1;
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, sizeof(DNSHeader_t));
-         ptr += 4;
+         iUdp.write((uint8_t*)buf,4);
          
          this->_resolveLastSendMillis[(type == MDNSPacketTypeServiceQuery) ? 1 : 0] = millis();
          
@@ -512,34 +464,23 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
       
       case MDNSPacketTypeNoIPv6AddrAvailable: {
          // since the WIZnet doesn't have IPv6, we will respond with a Not Found message
-         this->_writeDNSName(this->_bonjourName, &ptr, buf, sizeof(DNSHeader_t), 1);
+         this->_writeDNSName(this->_bonjourName, 1);
          
          buf[0] = buf[2] = 0x0;
          buf[1] = 0x1c; // AAAA record
          buf[3] = 0x01;
          
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 4);
-         ptr += 4;
+         iUdp.write((uint8_t*)buf,4);
          
          // send our IPv4 address record as additional record, in case the peer wants it.
-         this->_writeMyIPAnswerRecord(&ptr, buf, sizeof(DNSHeader_t));
+         this->_writeMyIPAnswerRecord();
          
          break;
       }
    }
 
-   ethernet_compat_write_SnTX_WR(this->_socket, ptr);
-   ethernet_compat_write_SnCR(this->_socket, ECSnCrSockSend);
+   iUdp.endPacket();
 
-   while(ethernet_compat_read_SnCR(this->_socket));
-
-errorReturn:
-
-#if defined(_USE_MALLOC_)
-   if (NULL != dnsHeader)
-      my_free(dnsHeader);
-#endif
-   
    return statusCode;
 }
 
@@ -549,16 +490,12 @@ errorReturn:
 MDNSError_t EthernetBonjourClass::_processMDNSQuery()
 {
    MDNSError_t statusCode = MDNSSuccess;
-#if defined(_USE_MALLOC_)
-   DNSHeader_t* dnsHeader = NULL;
-#else
    DNSHeader_t dnsHeaderBuf;
    DNSHeader_t* dnsHeader = &dnsHeaderBuf;
-#endif
    int i, j;
    uint8_t* buf;
-   uint32_t peer_addr, xid;
-   uint16_t peer_port, udp_len, ptr, qCnt, aCnt, aaCnt, addCnt;
+   uint32_t xid;
+   uint16_t ptr, qCnt, aCnt, aaCnt, addCnt;
    uint8_t recordsAskedFor[NumMDNSServiceRecords+2];
    uint8_t recordsFound[2];
    uint8_t wantsIPv6Addr = 0;
@@ -566,44 +503,24 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
    memset(recordsAskedFor, 0, sizeof(uint8_t)*(NumMDNSServiceRecords+2));
    memset(recordsFound, 0, sizeof(uint8_t)*2);
    
-   if (0 == ethernet_compat_read_SnRX_RSR(this->_socket)) {
-      statusCode = MDNSTryLater;
-      goto errorReturn;
+   if (0 == iUdp.parsePacket()) {
+	   statusCode = MDNSTryLater;
+       goto errorReturn;
    }
    
-#if defined(_USE_MALLOC_)
-   dnsHeader = (DNSHeader_t*)my_malloc(sizeof(DNSHeader_t));
-   if (NULL == dnsHeader) {
-      statusCode = MDNSOutOfMemory;
-      goto errorReturn;
-   }
-#endif
+   iUdp.read((unsigned char*)dnsHeader, sizeof(DNSHeader_t));
    
-   ptr = ethernet_compat_read_SnRX_RD(this->_socket);
-
-   // read UDP header
-   buf = (uint8_t*)dnsHeader;
-   ethernet_compat_read_data(this->_socket, (uint8_t*)ptr, (uint8_t*)buf, 8);
-   ptr += 8;
-
-   memcpy(&peer_addr, buf, sizeof(uint32_t));
-   *((uint16_t*)&peer_port) = ethutil_ntohs(*((uint32_t*)(buf+4)));
-   *((uint16_t*)&udp_len) = ethutil_ntohs(*((uint32_t*)(buf+6)));
-   
-   ethernet_compat_read_data(this->_socket, (uint8_t*)ptr, (uint8_t*)dnsHeader, sizeof(DNSHeader_t));
-   
-   xid = ethutil_ntohs(dnsHeader->xid);
-   qCnt = ethutil_ntohs(dnsHeader->queryCount);
-   aCnt = ethutil_ntohs(dnsHeader->answerCount);
-   aaCnt = ethutil_ntohs(dnsHeader->authorityCount);
-   addCnt = ethutil_ntohs(dnsHeader->additionalCount);
+   xid = ntohs(dnsHeader->xid);
+   qCnt = ntohs(dnsHeader->queryCount);
+   aCnt = ntohs(dnsHeader->answerCount);
+   aaCnt = ntohs(dnsHeader->authorityCount);
+   addCnt = ntohs(dnsHeader->additionalCount);
 
    if (0 == dnsHeader->queryResponse &&
        DNSOpQuery == dnsHeader->opCode &&
-       MDNS_SERVER_PORT == peer_port) {
+       MDNS_SERVER_PORT == iUdp.remotePort()) {
       
       // process an MDNS query
-      int offset = sizeof(DNSHeader_t);
       uint8_t* buf = (uint8_t*)dnsHeader;
       int rLen = 0, tLen = 0;
 
@@ -642,14 +559,12 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
    
          tLen = 0;
          do {
-            ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 1);
-            offset += 1;
+            iUdp.read((unsigned char*)buf, 1);
             rLen = buf[0];
             tLen += 1;
             
             if (rLen > 128) {// handle DNS name compression, kinda, sorta            
-               ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 1);
-               offset += 1;
+               iUdp.read((unsigned char*)buf, 1);
                
                for (j=0; j<NumMDNSServiceRecords+2; j++) {
                   if (servNamePos[j] && servNamePos[j] != buf[0]) {
@@ -664,8 +579,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                while (tr > 0) {
                   ir = (tr > sizeof(DNSHeader_t)) ? sizeof(DNSHeader_t) : tr;
                   
-                  ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, ir);
-                  offset += ir;
+                  iUdp.read((unsigned char*)buf, ir);
                   tr -= ir;
                   
                   for (j=0; j<NumMDNSServiceRecords+2; j++) {
@@ -680,16 +594,15 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
          } while (rLen > 0 && rLen <= 128);
 
          // if this matched a name of ours (and there are no characters left), then
-         // check wether this is an A record query (for our own name) or a PTR record query
+         // check whether this is an A record query (for our own name) or a PTR record query
          // (for one of our services).
          // if so, we'll note to send a record
-         ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 4);
-         offset += 4;
+         iUdp.read((unsigned char*)buf, 4);
          
          for (j=0; j<NumMDNSServiceRecords+2; j++) {
             if (!recordsAskedFor[j] && servNames[j] && servMatches[j] && 0 == servLens[j]) {
                if (0 == servNamePos[j])
-                  servNamePos[j] = offset - 4 - tLen;
+                  servNamePos[j] = 4 - tLen;//TODO
                
                if (buf[0] == 0 && buf[3] == 0x01 &&
                   (buf[2] == 0x00 || buf[2] == 0x80)) {
@@ -708,7 +621,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
    
    else if (1 == dnsHeader->queryResponse &&
               DNSOpQuery == dnsHeader->opCode &&
-              MDNS_SERVER_PORT == peer_port &&
+              MDNS_SERVER_PORT == iUdp.remotePort() &&
               (NULL != this->_resolveNames[0] || NULL != this->_resolveNames[1])) {
          
          int offset = sizeof(DNSHeader_t);
@@ -770,14 +683,12 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
             tLen = 0;
                         
             do {
-               ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 1);
-               offset += 1;
+               iUdp.read((unsigned char*)buf, 1);
                rLen = buf[0];
                tLen += 1;
             
                if (rLen > 128) { // handle DNS name compression, kinda, sorta...                         
-                  ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 1);
-                  offset += 1;
+                  iUdp.read((unsigned char*)buf, 1);
 
                   for (j=0; j<2; j++) {
                      if (servNamePos[j] && servNamePos[j] != buf[0])
@@ -804,8 +715,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                      while (tr > 0) {
                         ir = (tr > sizeof(DNSHeader_t)) ? sizeof(DNSHeader_t) : tr;
                   
-                        ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, ir);
-                        offset += ir;
+                        iUdp.read((unsigned char*)buf, ir);
                         tr -= ir;
                   
                         for (j=0; j<2; j++) {
@@ -838,7 +748,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
             } while (rLen > 0 && rLen <= 128);
                         
             // if this matched a name of ours (and there are no characters left), then
-            // check wether this is an A record query (for our own name) or a PTR record query
+            // check whether this is an A record query (for our own name) or a PTR record query
             // (for one of our services).
             // if so, we'll note to send a record
             if (i < qCnt)
@@ -849,8 +759,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                
                uint8_t packetHandled = 0;
                               
-               ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 4);
-               offset += 4;
+               iUdp.read((unsigned char*)buf, 4);
                
                if (i < qCnt+aCnt) {
                   for (j=0; j<2; j++) {
@@ -867,15 +776,14 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                            recordsFound[j] = 1;
                         
                            // this is an A or PTR type response. Parse it as such.
-                           ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 6);
-                           offset += 6;
+                           iUdp.read((unsigned char*)buf, 6);
                         
-                           //uint32_t ttl = ethutil_ntohl(*(uint32_t*)buf);
-                           uint16_t dataLen = ethutil_ntohs(*(uint16_t*)&buf[4]);
+                           //uint32_t ttl = ntohl(*(uint32_t*)buf);
+                           uint16_t dataLen = ntohs(*(uint16_t*)&buf[4]);
                         
                            if (0 == j && 4 == dataLen) {
                               // ok, this is the IP address. report it via callback.
-                              ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 4);
+                              iUdp.read((unsigned char*)buf, 4);
                               
                               this->_finishedResolvingName((char*)this->_resolveNames[0],
                                                            (const byte*)buf);
@@ -891,11 +799,8 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                                  uint8_t* ptrName = (uint8_t*)my_malloc(l);
                               
                                  if (ptrName) {
-                                    ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset),
-                                             (uint8_t*)buf, 1);
-                                    
-                                    ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset+1),
-                                             (uint8_t*)ptrName, l-1);
+                                    iUdp.read((unsigned char*)buf, 1);
+                                    iUdp.read((unsigned char*)ptrName, l-1);
                                  
                                     if (buf[0] < l-1)
                                        ptrName[buf[0]]; // this catches uncompressed names
@@ -910,7 +815,7 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                               }
                            }
                         
-                           offset += dataLen;
+                           //offset += dataLen;
                         
                            packetHandled = 1;
                         }
@@ -924,16 +829,15 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                               ((firstNamePtrByte && firstNamePtrByte == ptrOffsets[j]) ||
                               (0 == ptrLensCmp[j] && ptrNamesMatches[j]))) {
                            // we have found the matching SRV location packet to a previous SRV domain
-                           ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 6);
-                           offset += 6;
+                           iUdp.read((unsigned char*)buf, 6);
                      
-                           //uint32_t ttl = ethutil_ntohl(*(uint32_t*)buf);
-                           uint16_t dataLen = ethutil_ntohs(*(uint16_t*)&buf[4]);
+                           //uint32_t ttl = ntohl(*(uint32_t*)buf);
+                           uint16_t dataLen = ntohs(*(uint16_t*)&buf[4]);
 
                            if (dataLen >= 8) {
-                              ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 8);
+                              iUdp.read((unsigned char*)buf, 8);
                               
-                              ptrPorts[j] = ethutil_ntohs(*(uint16_t*)&buf[4]);
+                              ptrPorts[j] = ntohs(*(uint16_t*)&buf[4]);
                               
                               if (buf[6] > 128) { // target is a compressed name
                                  ptrIPs[j] = buf[7];
@@ -954,18 +858,16 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                               ((firstNamePtrByte && firstNamePtrByte == ptrOffsets[j]) ||
                               (0 == ptrLensCmp[j] && ptrNamesMatches[j]))) {
                            
-                           ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 6);
-                           offset += 6;
+                           iUdp.read((unsigned char*)buf, 6);
 
-                           //uint32_t ttl = ethutil_ntohl(*(uint32_t*)buf);
-                           uint16_t dataLen = ethutil_ntohs(*(uint16_t*)&buf[4]);
+                           //uint32_t ttl = ntohl(*(uint32_t*)buf);
+                           uint16_t dataLen = ntohs(*(uint16_t*)&buf[4]);
                         
                            // if there's a content to this txt record, save it for delivery
                            if (dataLen > 1 && NULL == servTxt[j]) {
                               servTxt[j] = (uint8_t*)my_malloc(dataLen+1);
                               if (NULL != servTxt[j]) {
-                                 ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)servTxt[j],
-                                           dataLen);
+                                 iUdp.read((unsigned char*)servTxt[j], dataLen);
                               
                                  // zero-terminate
                                  servTxt[j][dataLen] = '\0';
@@ -983,14 +885,12 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                         if (0 == servIPs[j][0]) {
                            servIPs[j][0] = firstNamePtrByte ? firstNamePtrByte : 255;
                      
-                           ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 6);
-                           offset += 6;
+                           iUdp.read((unsigned char*)buf, 6);
                         
-                           uint16_t dataLen = ethutil_ntohs(*(uint16_t*)&buf[4]);
+                           uint16_t dataLen = ntohs(*(uint16_t*)&buf[4]);
                         
                            if (4 == dataLen) {
-                              ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset),
-                                        (uint8_t*)&servIPs[j][1], 4);
+                              iUdp.read((unsigned char*)&servIPs[j][1], 4);
                            }
                         
                            offset += dataLen;
@@ -1004,9 +904,9 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
                
                // eat the answer
                if (!packetHandled) {
-                  offset += 4; // ttl
-                  ethernet_compat_read_data(this->_socket, (uint8_t*)(ptr+offset), (uint8_t*)buf, 2); // length
-                  offset += 2 + ethutil_ntohs(*(uint16_t*)buf); // skip over content
+                  iUdp.read((unsigned char*)buf, 4); // ignore ttl
+                  iUdp.read((unsigned char*)buf, 2); // length
+                  iUdp.read((unsigned char*)buf, ntohs(*(uint16_t*)buf)); // skip over content
                }
             }
          }
@@ -1061,37 +961,27 @@ MDNSError_t EthernetBonjourClass::_processMDNSQuery()
 
 #endif // (defined(HAS_SERVICE_REGISTRATION) && HAS_SERVICE_REGISTRATION) || (defined(HAS_NAME_BROWSING) && HAS_NAME_BROWSING)
 
-   ptr += udp_len;
-   
-   ethernet_compat_write_SnRX_RD(this->_socket, ptr);
-   ethernet_compat_write_SnCR(this->_socket, ECSnCrSockRecv);
-
-   while(ethernet_compat_read_SnCR(this->_socket));
+iUdp.flush();
 
 errorReturn:
-
-#if defined(_USE_MALLOC_) 
-   if (NULL != dnsHeader)
-      my_free(dnsHeader);
-#endif
    
    // now, handle the requests
    for (j=0; j<NumMDNSServiceRecords+2; j++) {
       if (recordsAskedFor[j]) {
          if (0 == j)
-            (void)this->_sendMDNSMessage(peer_addr, xid, (int)MDNSPacketTypeMyIPAnswer, 0);
+            (void)this->_sendMDNSMessage(iUdp.remoteIP(), xid, (int)MDNSPacketTypeMyIPAnswer, 0);
          else if (1 == j) {
             uint8_t k = 2;
             for (k=0; k<NumMDNSServiceRecords; k++)
                recordsAskedFor[k+2] = 1;
          } else if (NULL != this->_serviceRecords[j-2])
-            (void)this->_sendMDNSMessage(peer_addr, xid, (int)MDNSPacketTypeServiceRecord, j-2);
+            (void)this->_sendMDNSMessage(iUdp.remoteIP(), xid, (int)MDNSPacketTypeServiceRecord, j-2);
       }
    }
    
    // if we were asked for our IPv6 address, say that we don't have any
    if (wantsIPv6Addr)
-      (void)this->_sendMDNSMessage(peer_addr, xid, (int)MDNSPacketTypeNoIPv6AddrAvailable, 0);
+      (void)this->_sendMDNSMessage(iUdp.remoteIP(), xid, (int)MDNSPacketTypeNoIPv6AddrAvailable, 0);
    
    return statusCode;
 }
@@ -1299,12 +1189,12 @@ void EthernetBonjourClass::removeAllServiceRecords()
       this->_removeServiceRecord(i);
 }
 
-void EthernetBonjourClass::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
-                                         uint8_t* buf, int bufSize, int zeroTerminate)
+void EthernetBonjourClass::_writeDNSName(const uint8_t* name, int zeroTerminate)
 {
-   uint16_t ptr = *pPtr;
    uint8_t* p1 = (uint8_t*)name, *p2, *p3;
    int i, c, len;
+   const int bufSize = 20;//TODO
+   uint8_t buf[bufSize];
    
    while(*p1) {
       c = 1;
@@ -1319,8 +1209,7 @@ void EthernetBonjourClass::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
          *p3++ = *p1++;
 
          if (--len <= 0) {
-            ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, bufSize);
-            ptr += bufSize;
+            iUdp.write((uint8_t*)buf,bufSize);
             len = bufSize;
             p3 = buf;
          }
@@ -1330,55 +1219,43 @@ void EthernetBonjourClass::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
          ++p1;
 
       if (len != bufSize) {
-         ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, bufSize-len);
-         ptr += bufSize-len;
+         iUdp.write((uint8_t*)buf,bufSize-len);
       }
    }
    
    if (zeroTerminate) {
       buf[0] = 0;
-      ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 1);
-      ptr += 1;
+      iUdp.write((uint8_t*)buf,1);
    }
-      
-   *pPtr = ptr;
 }
 
-void EthernetBonjourClass::_writeMyIPAnswerRecord(uint16_t* pPtr, uint8_t* buf, int bufSize)
+void EthernetBonjourClass::_writeMyIPAnswerRecord()
 {
-   uint16_t ptr = *pPtr;
-   
-   this->_writeDNSName(this->_bonjourName, &ptr, buf, bufSize, 1);
+   this->_writeDNSName(this->_bonjourName, 1);
 
+   uint8_t buf[10];
    buf[0] = 0x00;
    buf[1] = 0x01;
    buf[2] = 0x80; // cache flush: true
    buf[3] = 0x01;
-   ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 4);
-   ptr += 4;
+   iUdp.write((uint8_t*)buf,4);
 
-   *((uint32_t*)buf) = ethutil_htonl(MDNS_RESPONSE_TTL);
-   *((uint16_t*)&buf[4]) = ethutil_htons(4);      // data length
+   *((uint32_t*)buf) = htonl(MDNS_RESPONSE_TTL);
+   *((uint16_t*)&buf[4]) = htons(4);      // data length
 
    uint8_t myIp[4];
-   ethernet_compat_read_SIPR(myIp);
+   W5100.readSIPR(myIp);
    memcpy(&buf[6], myIp, 4);              // our IP address
 
-   ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 10);
-   ptr += 10;
-   
-   *pPtr = ptr;
+   iUdp.write((uint8_t*)buf,10);
 }
 
-void EthernetBonjourClass::_writeServiceRecordName(int recordIndex, uint16_t* pPtr, uint8_t* buf,
-                                                   int bufSize, int tld)
+void EthernetBonjourClass::_writeServiceRecordName(int recordIndex, int tld)
 {
-   uint16_t ptr = *pPtr;
-      
    uint8_t* name = tld ? this->_serviceRecords[recordIndex]->servName :
                          this->_serviceRecords[recordIndex]->name;
    
-   this->_writeDNSName(name, &ptr, buf, bufSize, tld);
+   this->_writeDNSName(name, tld);
    
    if (0 == tld) {
       const uint8_t* srv_type =
@@ -1386,38 +1263,31 @@ void EthernetBonjourClass::_writeServiceRecordName(int recordIndex, uint16_t* pP
    
       if (NULL != srv_type) {
          srv_type++; // eat the dot at the beginning
-         this->_writeDNSName(srv_type, &ptr, buf, bufSize, 1);
+         this->_writeDNSName(srv_type, 1);
       }
    }
-   
-   *pPtr = ptr;
 }
 
-void EthernetBonjourClass::_writeServiceRecordPTR(int recordIndex, uint16_t* pPtr, uint8_t* buf,
-                                                  int bufSize, uint32_t ttl)
+void EthernetBonjourClass::_writeServiceRecordPTR(int recordIndex, uint32_t ttl)
 {
-   uint16_t ptr = *pPtr;
-
-   this->_writeServiceRecordName(recordIndex, &ptr, buf, bufSize, 1);
+   this->_writeServiceRecordName(recordIndex, 1);
    
+   uint8_t buf[10];
    buf[0] = 0x00;
    buf[1] = 0x0c;    // PTR record
    buf[2] = 0x00;    // no cache flush
    buf[3] = 0x01;    // class IN
    
    // ttl
-   *((uint32_t*)&buf[4]) = ethutil_htonl(ttl);
+   *((uint32_t*)&buf[4]) = htonl(ttl);
    
    // data length (+13 = "._tcp.local" or "._udp.local" + 1  byte zero termination)
    *((uint16_t*)&buf[8]) =
-         ethutil_htons(strlen((char*)this->_serviceRecords[recordIndex]->name) + 13);
+         htons(strlen((char*)this->_serviceRecords[recordIndex]->name) + 13);
    
-   ethernet_compat_write_data(this->_socket, (uint8_t*)buf, (uint8_t*)ptr, 10);
-   ptr += 10;
+   iUdp.write((uint8_t*)buf,10);
    
-   this->_writeServiceRecordName(recordIndex, &ptr, buf, bufSize, 0);
-   
-   *pPtr = ptr;
+   this->_writeServiceRecordName(recordIndex, 0);
 }
 
 uint8_t* EthernetBonjourClass::_findFirstDotFromRight(const uint8_t* str)

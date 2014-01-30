@@ -1,7 +1,7 @@
-//  Copyright (C) 2010 Georg Kaindl
-//  http://gkaindl.com
+//  Copyright (C) 2010 Georg Kaindl (http://gkaindl.com)
+//  Copyright (C) 2013 David Gräff (david.graeff@web.de)
 //
-//  This file is part of Arduino EthernetBonjour.
+//  This file is part of Arduino Bonjour/mDNS/Avahi for arduino 1.5+
 //
 //  EthernetBonjour is free software: you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public License
@@ -24,6 +24,7 @@
 extern "C" {
    #include <inttypes.h>
 }
+#include <EthernetUdp.h>
 
 typedef uint8_t byte;
 
@@ -69,13 +70,19 @@ typedef void (*BonjourNameFoundCallback)(const char*, const byte[4]);
 typedef void (*BonjourServiceFoundCallback)(const char*, MDNSServiceProtocol_t, const char*,
                                             const byte[4], unsigned short, const char*);
 
-#define  NumMDNSServiceRecords   (1)
+#define  NumMDNSServiceRecords   (8)
+
+extern const uint8_t ECSockClosed;
+extern const uint8_t ECSnCrSockSend;
+extern const uint8_t ECSnCrSockRecv;
+extern const uint8_t ECSnMrUDP;
+extern const uint8_t ECSnMrMulticast;
 
 class EthernetBonjourClass
 {
 private:
    MDNSDataInternal_t    _mdnsData;
-   int                  _socket;
+   EthernetUDP iUdp;
    MDNSState_t           _state;
    uint8_t*             _bonjourName;
    MDNSServiceRecord_t* _serviceRecords[NumMDNSServiceRecords];
@@ -96,11 +103,11 @@ private:
    int _startMDNSSession();
    int _closeMDNSSession();
    
-   void _writeDNSName(const uint8_t* name, uint16_t* pPtr, uint8_t* buf, int bufSize,
+   void _writeDNSName(const uint8_t* name,
                       int zeroTerminate);
-   void _writeMyIPAnswerRecord(uint16_t* pPtr, uint8_t* buf, int bufSize);
-   void _writeServiceRecordName(int recordIndex, uint16_t* pPtr, uint8_t* buf, int bufSize, int tld);
-   void _writeServiceRecordPTR(int recordIndex, uint16_t* pPtr, uint8_t* buf, int bufSize,
+   void _writeMyIPAnswerRecord();
+   void _writeServiceRecordName(int recordIndex, int tld);
+   void _writeServiceRecordPTR(int recordIndex,
                                uint32_t ttl);
    
    int _initQuery(uint8_t idx, const char* name, unsigned long timeout);

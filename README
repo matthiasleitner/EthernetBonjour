@@ -1,16 +1,11 @@
-Arduino Bonjour Library, Source http://gkaindl.com/software/arduino-ethernet/bonjour
-
-I just make minor changes so this lib works fine with Arduino 1.0.
-
-Readme from their Website:
-
-
-
 Bonjour/Zeroconf with Arduino
 -----------------------------
 A small implementation of Bonjour/Zeroconf (Wikipedia) that can run on your ethernet-equipped Arduino board! It implements both MDNS (multicast DNS) and DNS-SD (DNS Service Discovery), so that you can register services from your Arduino, but also discover services registered by other nodes on the network.
 
 As examples, you can use this library to register a small web-server running on your Arduino, which can then be easily discovered by other users on your network. Or use it to discover nodes offering a service your Arduino sketch can work with. It's just like Bonjour running on your desktop.
+
+**You can find here a modernized port of the original library of [http://gkaindl.com/software/arduino-ethernet/bonjour]. This fork uses the build-on EthernetUDP class
+and is much simpler and with fewer helper-classes than the original code.**
 
 Documentation
 -------------

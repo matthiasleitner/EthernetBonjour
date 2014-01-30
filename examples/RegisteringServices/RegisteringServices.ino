@@ -1,7 +1,7 @@
-//  Copyright (C) 2010 Georg Kaindl
-//  http://gkaindl.com
+//  Copyright (C) 2010 Georg Kaindl (http://gkaindl.com)
+//  Copyright (C) 2013 David Gräff (david.graeff@web.de)
 //
-//  This file is part of Arduino EthernetBonjour.
+//  This file is part of Arduino Bonjour/mDNS/Avahi for arduino 1.5+
 //
 //  EthernetBonjour is free software: you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public License
@@ -20,9 +20,6 @@
 
 //  Illustrates how to register a Bonjour service.
 
-#if defined(ARDUINO) && ARDUINO > 18
-#include <SPI.h>
-#endif
 #include <Ethernet.h>
 #include <EthernetBonjour.h>
 
@@ -31,14 +28,13 @@ byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 // substitute an address on your own network here
 byte ip[] = { 192, 168, 0, 154 };
 
-// NOTE: Alternatively, you can use the EthernetDHCP library to configure your
-//       Ethernet shield.
-
 Server server(80);
 
 void setup()
 {
-  Ethernet.begin(mac, ip);
+  // Try dhcp, if that fails use the predefined ip address
+  if (!Ethernet.begin(mac))
+    Ethernet.begin(mac, ip);
   server.begin();
 
   // Initialize the Bonjour/MDNS library. You can now reach or ping this
