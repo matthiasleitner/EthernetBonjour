@@ -1,7 +1,7 @@
-//  Copyright (C) 2010 Georg Kaindl (http://gkaindl.com)
-//  Copyright (C) 2013 David Gräff (david.graeff@web.de)
+//  Copyright (C) 2010 Georg Kaindl
+//  http://gkaindl.com
 //
-//  This file is part of Arduino Bonjour/mDNS/Avahi for arduino 1.5+
+//  This file is part of Arduino EthernetBonjour.
 //
 //  EthernetBonjour is free software: you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public License
