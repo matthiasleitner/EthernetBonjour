@@ -19,6 +19,7 @@
 //
 
 //  Illustrates how to discover Bonjour services on your network.
+#include <SPI.h>
 
 #include <Ethernet.h>
 #include <EthernetBonjour.h>

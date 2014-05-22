@@ -448,8 +448,7 @@ MDNSError_t EthernetBonjourClass::_sendMDNSMessage(uint32_t peerAddress, uint32_
          // construct a query for the currently set _resolveNames[0]
          this->_writeDNSName(
                (type == MDNSPacketTypeServiceQuery) ? this->_resolveNames[1] :
-                                                      this->_resolveNames[0],
-               , 1);
+                                                      this->_resolveNames[0], 1);
 
          buf[0] = buf[2] = 0x0;
          buf[1] = (type == MDNSPacketTypeServiceQuery) ? 0x0c : 0x01; 
